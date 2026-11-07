@@ -2,20 +2,14 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { Stack } from 'expo-router';
 import React, { useEffect } from 'react';
 import { useColorScheme } from 'react-native';
-
-// Make sure to import your real database initializer here if you have one,
-// e.g.: import { initializeDatabase } from '../database/init';
-// Or provide a fallback if it's not yet implemented:
-const initializeDatabase = async () => {
-  // Database initialization logic here
-};
+import { initializeDatabase } from '../database/database';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
 
   useEffect(() => {
     initializeDatabase()
-      .then(() => console.log('Database ready'))
+      .then(() => console.log('Database initialized successfully'))
       .catch((error) => console.error('Database initialization failed:', error));
   }, []);
 
