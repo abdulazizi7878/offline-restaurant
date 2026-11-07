@@ -1,12 +1,12 @@
 
 import { DeviceRepository } from "../database/device.repository";
 import { MessageRepository } from "../database/message.repository";
-import { NearbyClient } from "../lib/nearby/nearbyClient";
 import { MessageFactory } from "../protocol/messageFactory";
 import { MESSAGE_TYPES } from "../protocol/messageTypes";
 import { parseEnvelope } from "../protocol/messageValidator";
 import { ConnectionService } from "./connection.service";
 import { DeviceService } from "./device.service";
+import { TCPTransport } from "./tcp-transport.service";
 
 const listeners = new Set();
 const peerDevices = new Map();
@@ -27,14 +27,13 @@ function emit(event, data) {
 }
 
 async function transmit(peerId, envelope) {
-    await NearbyClient.send(peerId, JSON.stringify(envelope));
+    await TCPTransport.send(peerId, JSON.stringify(envelope));
 }
 
 async function handleIncoming({ peerId, text }) {
     const result = parseEnvelope(text);
 
     if (!result.valid) {
-        console.warn("Rejected incoming message:", result.error);
         emit("invalidMessage", { peerId, error: result.error });
         return;
     }
@@ -65,18 +64,10 @@ async function handleIncoming({ peerId, text }) {
 
     const remoteDevice = peerDevices.get(peerId);
 
-    if (!remoteDevice) {
+    if (!remoteDevice || remoteDevice.deviceId !== message.sender.deviceId) {
         emit("invalidMessage", {
             peerId,
             error: "Sender identity has not been established",
-        });
-        return;
-    }
-
-    if (remoteDevice.deviceId !== message.sender.deviceId) {
-        emit("invalidMessage", {
-            peerId,
-            error: "Sender identity does not match handshake",
         });
         return;
     }
@@ -133,10 +124,7 @@ async function handleIncoming({ peerId, text }) {
 export const MessageService = {
     subscribe(callback) {
         listeners.add(callback);
-
-        return () => {
-            listeners.delete(callback);
-        };
+        return () => listeners.delete(callback);
     },
 
     async initialize() {
@@ -177,17 +165,16 @@ export const MessageService = {
             }
         );
 
-        unsubscribeMessages = NearbyClient.onTextReceived(
-            (event) => {
-                handleIncoming(event).catch((error) => {
-                    console.error("Incoming message processing failed:", error);
-                    emit("transportError", {
-                        peerId: event.peerId,
-                        error: error.message,
-                    });
+        unsubscribeMessages = TCPTransport.on("data", (event) => {
+            handleIncoming(event).catch((error) => {
+                console.error("Incoming message processing failed:", error);
+
+                emit("transportError", {
+                    peerId: event.peerId,
+                    error: error.message,
                 });
-            }
-        );
+            });
+        });
 
         initialized = true;
     },
@@ -210,7 +197,7 @@ export const MessageService = {
         const recipient = peerDevices.get(peerId);
 
         if (!recipient) {
-            throw new Error("Peer identity has not been established yet");
+            throw new Error("Wait for the device handshake to finish");
         }
 
         const envelope = MessageFactory.createChatMessage({

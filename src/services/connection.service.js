@@ -1,13 +1,13 @@
 
-import { NearbyClient } from "../lib/nearby/nearbyClient";
+import * as Network from "expo-network";
 import { DeviceService } from "./device.service";
-import { PermissionsService } from "./permissions.service";
+import { TCPTransport } from "./tcp-transport.service";
 
 const listeners = new Set();
 const peers = new Map();
 
-let subscriptions = [];
 let started = false;
+let serverInfo = null;
 
 function emit(event, data) {
     listeners.forEach((listener) => {
@@ -19,59 +19,57 @@ function emit(event, data) {
     });
 }
 
-function subscribeNearbyEvents() {
-    subscriptions = [
-        NearbyClient.onPeerFound((peer) => {
-            peers.set(peer.peerId, {
-                peerId: peer.peerId,
-                name: peer.name,
-                status: "discovered",
-            });
+function isValidIPv4(ip) {
+    if (typeof ip !== "string") return false;
 
-            emit("peerFound", peer);
-        }),
-
-        NearbyClient.onPeerLost(({ peerId }) => {
-            peers.delete(peerId);
-            emit("peerLost", { peerId });
-        }),
-
-        NearbyClient.onInvitationReceived((peer) => {
-            emit("invitationReceived", peer);
-        }),
-
-        NearbyClient.onConnected((peer) => {
-            peers.set(peer.peerId, {
-                ...peers.get(peer.peerId),
-                ...peer,
-                status: "connected",
-            });
-
-            emit("connected", peer);
-        }),
-
-        NearbyClient.onDisconnected(({ peerId }) => {
-            const peer = peers.get(peerId);
-
-            if (peer) {
-                peers.set(peerId, {
-                    ...peer,
-                    status: "disconnected",
-                });
-            }
-
-            emit("disconnected", { peerId });
-        }),
-    ];
+    const parts = ip.split(".");
+    return (
+        parts.length === 4 &&
+        parts.every((part) => {
+            const number = Number(part);
+            return /^\d+$/.test(part) && number >= 0 && number <= 255;
+        }) &&
+        ip !== "0.0.0.0" &&
+        ip !== "127.0.0.1"
+    );
 }
+
+TCPTransport.on("connection", (connection) => {
+    const peer = {
+        peerId: connection.peerId,
+        name: "Connected device",
+        status: "connected",
+        address: connection.remoteAddress,
+    };
+
+    peers.set(connection.peerId, peer);
+    emit("connected", peer);
+});
+
+TCPTransport.on("disconnection", ({ peerId }) => {
+    const peer = peers.get(peerId);
+
+    if (peer) {
+        peers.set(peerId, {
+            ...peer,
+            status: "disconnected",
+        });
+    }
+
+    emit("disconnected", { peerId });
+});
+
+TCPTransport.on("error", ({ peerId, error }) => {
+    emit("transportError", {
+        peerId,
+        error: error?.message || "TCP network error",
+    });
+});
 
 export const ConnectionService = {
     subscribe(callback) {
         listeners.add(callback);
-
-        return () => {
-            listeners.delete(callback);
-        };
+        return () => listeners.delete(callback);
     },
 
     getPeers() {
@@ -79,7 +77,7 @@ export const ConnectionService = {
     },
 
     async start() {
-        if (started) return;
+        if (started) return serverInfo;
 
         const device = await DeviceService.getCurrentDevice();
 
@@ -87,55 +85,68 @@ export const ConnectionService = {
             throw new Error("Initialize the device before connecting");
         }
 
-        await PermissionsService.requestNearbyPermissions();
+        let ipAddress = null;
 
-        subscribeNearbyEvents();
+        if (device.role === "cashier") {
+            await TCPTransport.startServer();
 
-        try {
-            await NearbyClient.startAdvertising("RestaurantMessenger");
-            await NearbyClient.startDiscovering("RestaurantMessenger");
+            try {
+                const detectedIP = await Network.getIpAddressAsync();
 
-            started = true;
-            emit("started", device);
-        } catch (error) {
-            subscriptions.forEach((unsubscribe) => unsubscribe?.());
-            subscriptions = [];
-            throw error;
+                if (isValidIPv4(detectedIP)) {
+                    ipAddress = detectedIP;
+                }
+            } catch (error) {
+                console.warn("Could not detect local IP:", error);
+            }
         }
+
+        started = true;
+
+        serverInfo = {
+            device,
+            ipAddress,
+            port: TCPTransport.getPort(),
+            address: ipAddress
+                ? `${ipAddress}:${TCPTransport.getPort()}`
+                : null,
+        };
+
+        emit("started", serverInfo);
+
+        return serverInfo;
+    },
+
+    async connect(host) {
+        const device = await DeviceService.getCurrentDevice();
+
+        if (!device || device.role !== "waiter") {
+            throw new Error("Only waiter devices can connect to a cashier");
+        }
+
+        return TCPTransport.connect(host);
     },
 
     async stop() {
         if (!started) return;
 
-        await Promise.allSettled([
-            NearbyClient.stopAdvertising(),
-            NearbyClient.stopDiscovering(),
-        ]);
-
-        subscriptions.forEach((unsubscribe) => unsubscribe?.());
-        subscriptions = [];
+        TCPTransport.stopServer();
 
         started = false;
+        serverInfo = null;
+
         emit("stopped", null);
     },
 
-    async connect(peerId) {
-        return NearbyClient.requestConnection(peerId);
-    },
-
-    async accept(peerId) {
-        return NearbyClient.acceptConnection(peerId);
-    },
-
-    async reject(peerId) {
-        return NearbyClient.rejectConnection(peerId);
-    },
-
     async disconnect(peerId) {
-        return NearbyClient.disconnect(peerId);
+        TCPTransport.disconnect(peerId);
+        peers.delete(peerId);
     },
 
     async disconnectAll() {
-        await NearbyClient.disconnectAll();
+        TCPTransport.disconnectAll();
+        peers.clear();
+        started = false;
+        serverInfo = null;
     },
 };

@@ -1,216 +1,308 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
 import {
     ActivityIndicator,
     Alert,
-    FlatList,
     SafeAreaView,
     StatusBar,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
-} from 'react-native';
-import ConnectionStatus from '../components/ConnectionStatus';
-import DeviceCard from '../components/DeviceCard';
-import { ConnectionService } from '../services/connection.service';
-import { DeviceService } from '../services/device.service';
-import { MessageService } from '../services/message.service';
+} from "react-native";
+
+import ConnectionStatus from "../components/ConnectionStatus";
+import { ConnectionService } from "../services/connection.service";
+import { DeviceService } from "../services/device.service";
+import { MessageService } from "../services/message.service";
 
 export default function WaiterScreen() {
     const router = useRouter();
-    const [isSearching, setIsSearching] = useState(false);
-    const [connectingPeerId, setConnectingPeerId] = useState(null);
-    const [discoveredPeers, setDiscoveredPeers] = useState([]);
-    const connectingPeerRef = useRef(null);
+
+    const [cashierIp, setCashierIp] = useState("");
+    const [isConnecting, setIsConnecting] = useState(false);
+    const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
-        let unsubscribeConn = null;
-        let unsubscribeMsg = null;
+        let unsubscribeConnection;
+        let unsubscribeMessages;
+        let mounted = true;
 
-        const setup = async () => {
+        async function setup() {
             try {
                 await DeviceService.initialize({
-                    name: 'Waiter Terminal',
-                    role: 'waiter',
+                    name: "Waiter Terminal",
+                    role: "waiter",
                 });
+
                 await MessageService.initialize();
 
-                unsubscribeConn = ConnectionService.subscribe((event, data) => {
-                    if (event === 'peerFound') {
-                        setDiscoveredPeers((prev) => {
-                            if (prev.some((p) => p.peerId === data.peerId)) return prev;
-                            return [...prev, { ...data, isAvailable: true }];
-                        });
-                    } else if (event === 'peerLost') {
-                        setDiscoveredPeers((prev) => prev.filter((p) => p.peerId !== data.peerId));
-                    } else if (event === 'invitationReceived') {
-                        ConnectionService.accept(data.peerId).catch(console.error);
-                    } else if (event === 'connected') {
-                        setConnectingPeerId(null);
-                        const targetPeer = connectingPeerRef.current;
-                        router.push({
-                            pathname: '/chat',
-                            params: {
-                                peerId: data.peerId,
-                                partnerName: targetPeer?.name || data.name || 'Cashier Terminal',
-                                partnerRole: 'cashier',
-                            },
-                        });
-                    } else if (event === 'disconnected') {
-                        setConnectingPeerId(null);
-                    }
-                });
+                unsubscribeConnection = ConnectionService.subscribe(
+                    (event) => {
+                        if (event === "connected") {
+                            setIsConnected(true);
+                            setIsConnecting(false);
+                        }
 
-                unsubscribeMsg = MessageService.subscribe((event, data) => {
-                    if (event === 'deviceIdentified') {
-                        setDiscoveredPeers((prev) =>
-                            prev.map((p) =>
-                                p.peerId === data.peerId
-                                    ? { ...p, name: data.device.name, role: data.device.role }
-                                    : p
-                            )
-                        );
+                        if (event === "disconnected") {
+                            setIsConnected(false);
+                            setIsConnecting(false);
+                        }
                     }
-                });
-            } catch (err) {
-                console.error('Setup error in WaiterScreen:', err);
-                Alert.alert('Initialization Error', err.message);
+                );
+
+                unsubscribeMessages = MessageService.subscribe(
+                    (event, data) => {
+                        if (
+                            event === "deviceIdentified" &&
+                            data.device.role === "cashier"
+                        ) {
+                            router.push({
+                                pathname: "/chat",
+                                params: {
+                                    peerId: data.peerId,
+                                    partnerName: data.device.name,
+                                    partnerRole: data.device.role,
+                                },
+                            });
+                        }
+                    }
+                );
+            } catch (error) {
+                if (mounted) {
+                    Alert.alert("Initialization Error", error.message);
+                }
             }
-        };
+        }
 
         setup();
 
         return () => {
-            unsubscribeConn?.();
-            unsubscribeMsg?.();
-            ConnectionService.stop().catch(() => { });
+            mounted = false;
+            unsubscribeConnection?.();
+            unsubscribeMessages?.();
         };
     }, []);
 
-    const handleToggleDiscovery = async () => {
-        try {
-            if (isSearching) {
-                await ConnectionService.stop();
-                setIsSearching(false);
-            } else {
-                await ConnectionService.start();
-                setIsSearching(true);
-            }
-        } catch (err) {
-            setIsSearching(false);
-            Alert.alert('Discovery Error', err.message);
-        }
-    };
+    const handleConnect = async () => {
+        const ip = cashierIp.trim();
 
-    const handleConnect = async (peer) => {
+        if (!ip) {
+            Alert.alert("Missing IP address", "Enter the cashier's hotspot IP.");
+            return;
+        }
+
         try {
-            connectingPeerRef.current = peer;
-            setConnectingPeerId(peer.peerId);
-            await ConnectionService.connect(peer.peerId);
-        } catch (err) {
-            setConnectingPeerId(null);
-            Alert.alert('Connection Failed', err.message);
+            setIsConnecting(true);
+            await ConnectionService.connect(ip);
+        } catch (error) {
+            setIsConnecting(false);
+            Alert.alert(
+                "Connection Failed",
+                `${error.message}\n\nCheck that the cashier server is running and both devices are on the same hotspot.`
+            );
         }
     };
 
     return (
         <SafeAreaView style={styles.safeArea}>
             <StatusBar barStyle="light-content" backgroundColor="#0B132B" />
+
             <View style={styles.container}>
                 <View style={styles.header}>
-                    <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-                        <MaterialCommunityIcons name="arrow-left" size={24} color="#F8FAFC" />
+                    <TouchableOpacity
+                        onPress={() => router.back()}
+                        style={styles.backButton}
+                    >
+                        <MaterialCommunityIcons
+                            name="arrow-left"
+                            size={24}
+                            color="#F8FAFC"
+                        />
                     </TouchableOpacity>
+
                     <View>
                         <Text style={styles.title}>Waiter Device</Text>
-                        <Text style={styles.roleSubtext}>Active Role: Waiter</Text>
+                        <Text style={styles.roleSubtext}>
+                            Active Role: Waiter
+                        </Text>
                     </View>
                 </View>
 
                 <View style={styles.statusSection}>
-                    <Text style={styles.sectionLabel}>STATUS</Text>
+                    <Text style={styles.sectionLabel}>CONNECTION STATUS</Text>
+
                     <ConnectionStatus
-                        status={isSearching ? 'searching' : 'disconnected'}
-                        label={isSearching ? 'Broadcasting & searching for cashiers...' : 'Offline (Not visible)'}
+                        status={
+                            isConnected
+                                ? "connected"
+                                : isConnecting
+                                    ? "searching"
+                                    : "disconnected"
+                        }
+                        label={
+                            isConnected
+                                ? "Connected to cashier"
+                                : isConnecting
+                                    ? "Connecting to cashier..."
+                                    : "Not connected"
+                        }
                     />
+                </View>
+
+                <View style={styles.infoCard}>
+                    <MaterialCommunityIcons
+                        name="access-point-network"
+                        size={36}
+                        color="#10B981"
+                    />
+
+                    <Text style={styles.infoTitle}>
+                        Connect to Cashier
+                    </Text>
+
+                    <Text style={styles.infoText}>
+                        Enter the IP address of the Samsung phone hosting
+                        the cashier server.
+                    </Text>
+
+                    <TextInput
+                        value={cashierIp}
+                        onChangeText={setCashierIp}
+                        placeholder="e.g. 192.168.43.1"
+                        placeholderTextColor="#64748B"
+                        keyboardType="numeric"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        editable={!isConnecting}
+                        style={styles.input}
+                    />
+
+                    <Text style={styles.portText}>
+                        TCP PORT: 8765
+                    </Text>
                 </View>
 
                 <TouchableOpacity
                     activeOpacity={0.8}
-                    style={[styles.discoveryButton, isSearching && styles.discoveryActiveButton]}
-                    onPress={handleToggleDiscovery}
+                    style={[
+                        styles.connectButton,
+                        isConnecting && styles.disabledButton,
+                    ]}
+                    onPress={handleConnect}
+                    disabled={isConnecting}
                 >
-                    <MaterialCommunityIcons
-                        name={isSearching ? 'stop-circle-outline' : 'radar'}
-                        size={20}
-                        color="#0F172A"
-                    />
-                    <Text style={styles.discoveryButtonText}>
-                        {isSearching ? 'Stop Discovery' : 'Discover Devices'}
+                    {isConnecting ? (
+                        <ActivityIndicator color="#0F172A" />
+                    ) : (
+                        <MaterialCommunityIcons
+                            name="lan-connect"
+                            size={20}
+                            color="#0F172A"
+                        />
+                    )}
+
+                    <Text style={styles.buttonText}>
+                        {isConnecting ? "Connecting..." : "Connect to Cashier"}
                     </Text>
                 </TouchableOpacity>
-
-                <View style={styles.listSection}>
-                    <Text style={styles.sectionLabel}>NEARBY DEVICES</Text>
-                    <FlatList
-                        data={discoveredPeers}
-                        keyExtractor={(item) => item.peerId}
-                        renderItem={({ item }) => (
-                            <DeviceCard
-                                name={item.name || `Device (${item.peerId.slice(0, 5)})`}
-                                role={item.role || 'Cashier'}
-                                isAvailable={item.isAvailable && connectingPeerId !== item.peerId}
-                                onConnect={() => handleConnect(item)}
-                            />
-                        )}
-                        ListEmptyComponent={
-                            <View style={styles.emptyContainer}>
-                                {isSearching ? (
-                                    <ActivityIndicator size="large" color="#10B981" style={{ marginBottom: 12 }} />
-                                ) : (
-                                    <MaterialCommunityIcons name="access-point-network-off" size={48} color="#334155" />
-                                )}
-                                <Text style={styles.emptyTitle}>
-                                    {isSearching ? 'Searching for Cashier Terminal...' : 'No Cashier Found'}
-                                </Text>
-                                <Text style={styles.emptySubtitle}>
-                                    {isSearching
-                                        ? 'Searching for cashier terminals in range...'
-                                        : 'Tap "Discover Devices" to connect to a cashier terminal.'}
-                                </Text>
-                            </View>
-                        }
-                    />
-                </View>
             </View>
         </SafeAreaView>
     );
 }
 
 const styles = StyleSheet.create({
-    safeArea: { flex: 1, backgroundColor: '#0B132B' },
-    container: { flex: 1, padding: 20 },
-    header: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
-    backButton: { marginRight: 16, padding: 4 },
-    title: { fontSize: 22, fontWeight: '700', color: '#F8FAFC' },
-    roleSubtext: { color: '#94A3B8', fontSize: 13 },
-    statusSection: { marginBottom: 16 },
-    sectionLabel: { color: '#64748B', fontSize: 11, fontWeight: '700', letterSpacing: 1, marginBottom: 8 },
-    discoveryButton: {
-        flexDirection: 'row',
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: '#10B981',
-        paddingVertical: 14,
-        borderRadius: 12,
+    safeArea: {
+        flex: 1,
+        backgroundColor: "#0B132B",
+    },
+    container: {
+        flex: 1,
+        padding: 20,
+    },
+    header: {
+        flexDirection: "row",
+        alignItems: "center",
         marginBottom: 24,
     },
-    discoveryActiveButton: { backgroundColor: '#F59E0B' },
-    discoveryButtonText: { color: '#0F172A', fontWeight: '700', fontSize: 15, marginLeft: 8 },
-    listSection: { flex: 1 },
-    emptyContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 48 },
-    emptyTitle: { color: '#E2E8F0', fontSize: 16, fontWeight: '600', marginTop: 12 },
-    emptySubtitle: { color: '#64748B', fontSize: 13, textAlign: 'center', marginTop: 6, paddingHorizontal: 24 },
+    backButton: {
+        marginRight: 16,
+        padding: 4,
+    },
+    title: {
+        fontSize: 22,
+        fontWeight: "700",
+        color: "#F8FAFC",
+    },
+    roleSubtext: {
+        color: "#94A3B8",
+        fontSize: 13,
+    },
+    statusSection: {
+        marginBottom: 24,
+    },
+    sectionLabel: {
+        color: "#64748B",
+        fontSize: 11,
+        fontWeight: "700",
+        letterSpacing: 1,
+        marginBottom: 8,
+    },
+    infoCard: {
+        backgroundColor: "#16213E",
+        borderRadius: 16,
+        padding: 24,
+        alignItems: "center",
+        marginBottom: 24,
+    },
+    infoTitle: {
+        color: "#F8FAFC",
+        fontSize: 18,
+        fontWeight: "700",
+        marginTop: 12,
+    },
+    infoText: {
+        color: "#94A3B8",
+        textAlign: "center",
+        lineHeight: 21,
+        marginTop: 8,
+        marginBottom: 20,
+    },
+    input: {
+        width: "100%",
+        backgroundColor: "#0B132B",
+        borderWidth: 1,
+        borderColor: "#334155",
+        borderRadius: 10,
+        paddingHorizontal: 14,
+        paddingVertical: 13,
+        color: "#F8FAFC",
+        fontSize: 16,
+        textAlign: "center",
+    },
+    portText: {
+        color: "#10B981",
+        fontWeight: "700",
+        marginTop: 16,
+    },
+    connectButton: {
+        flexDirection: "row",
+        justifyContent: "center",
+        alignItems: "center",
+        backgroundColor: "#10B981",
+        paddingVertical: 15,
+        borderRadius: 12,
+    },
+    disabledButton: {
+        opacity: 0.6,
+    },
+    buttonText: {
+        color: "#0F172A",
+        fontWeight: "700",
+        fontSize: 15,
+        marginLeft: 8,
+    },
 });
